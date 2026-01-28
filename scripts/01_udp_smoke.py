@@ -3,7 +3,9 @@ import time
 import signal
 import serial 
 
-#______________________________
+# ==============================
+# NETWORK SETTINGS (DCA1000)
+# ==============================
 HOST_IP = "192.168.33.30"
 HOST_DATA_PORT = 4098
 HOST_CONFIG_PORT = 4096
@@ -11,8 +13,16 @@ HOST_CONFIG_PORT = 4096
 DCA_IP = "192.168.33.180"
 DCA_CONFIG_PORT = 4096
 
-#______________________________
-# Frame Params
+# ==============================
+# RADAR UART SETTINGS (AWR2944)
+# ==============================
+RADAR_CLI_PORT = "COM9"              
+RADAR_CLI_BAUD = 115200
+RADAR_CFG_FILE = r".\config\awr2944.cfg"
+
+# ==============================
+# FRAME PARAMS (TEMP HARD-CODE)
+# ==============================
 ADC_SAMPLES = 64
 CHRIPS_PER_FRAME = 32
 RX_CHANNELS = 4
@@ -24,8 +34,9 @@ FRAME_BYTES = (ADC_SAMPLES*CHRIPS_PER_FRAME*RX_CHANNELS*TX_CHANNELS*BYTES_PER_SA
 
 UDP_BUFFER_SIZE = 2*1024*1024
 
-#__________________________________
-# DCA1000 Command Packets
+# ==============================
+# DCA1000 COMMAND PACKETS
+# ==============================
 
 def make_cmd(code_hex, data=b""):
     """
@@ -56,8 +67,9 @@ def dca_startup_commands():
         "STOP": make_cmd("06"),
     }
 
-#___________________________________________________
-# Shutdown if Ctrl C
+# ==============================
+# CLEAN SHUTDOWN
+# ==============================
 
 running = True
 
@@ -68,8 +80,9 @@ def handle_exit(sig,frame):
 
 signal.signal(signal.SIGINT,handle_exit)
 
-#___________________________________________
-# Main
+# ==============================
+# MAIN
+# ==============================
 
 def main():
     print("DCA UDP Test")
