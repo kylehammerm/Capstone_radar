@@ -18,7 +18,7 @@ DCA_CONFIG_PORT = 4096
 # ==============================
 RADAR_CLI_PORT = "COM9"              
 RADAR_CLI_BAUD = 115200
-RADAR_CFG_FILE = r".\config\awr2944.cfg"
+RADAR_CFG_FILE = r".\config\awr2944_cfg.cfg"
 
 # ==============================
 # FRAME PARAMS (TEMP HARD-CODE)
@@ -68,6 +68,60 @@ def dca_startup_commands():
     }
 
 # ==============================
+# RADAR CONTROL (UART)
+# ==============================
+def start_radar_via_uart(cli_port:str, baud: int, cfg_path: str):
+    """
+    Send the radar the config over uart and issue sensor start command
+    """
+    print(f"\n[UART] Opening radar CLI {cli_port} @ {baud} ...")
+    with serial.Serial(cli_port,baudrate=baud, timeout=1) as s:
+        time.sleep(2.0)
+    
+        def write_line(line: str):
+            s.write((line + "\n").encode("ascii"))
+            s.flush()
+            time.sleep(0.01)
+    
+        # Often good practice to stop first (won't hurt if already stopped)
+        print("[UART] Sending: sensorStop")
+        write_line("sensorStop")
+        time.sleep(0.2)
+
+        print(f"[UART] Sending config file: {cfg_path}")
+        with open(cfg_path, "r", encoding="utf-8", errors="ignore") as f:
+            for raw in f:
+                line = raw.strip()
+                if not line:
+                    continue
+
+                if line.startswith("%"):
+                    continue
+                write_line(line)
+        
+        print("[UART] Sending: sensorStart")
+        write_line("sensorStart")
+        time.sleep(0.2)
+
+    print("[UART] Done. Radar should be running (assuming LVDS streaming is enabled in cfg).")
+
+def stop_radar_via_uart(cli_port: str, baud: int):
+    """
+    Stopping the radar sensor from running 
+    """
+    try:
+        with serial.Serial(cli_port, baudrate=baud, timeout=1) as s:
+            time.sleep(0.2)
+            s.write(("sensorStop" + "\n").encode("ascii"))
+            s.flush()
+            time.sleep(0.2)
+        print("[UART] sensorStop sent.")
+    except Exception as e:
+        print(f"[UART] Could not send sensorStop ({e}).")
+
+
+
+# ==============================
 # CLEAN SHUTDOWN
 # ==============================
 
@@ -85,7 +139,7 @@ signal.signal(signal.SIGINT,handle_exit)
 # ==============================
 
 def main():
-    print("DCA UDP Test")
+    print("DCA AWR UDP Test")
     print(f"Expecting {FRAME_BYTES} bytes")
 
     cmds = dca_startup_commands()
@@ -109,12 +163,16 @@ def main():
             print(f"ACK ({name}):{data.hex()}")
         except socket.timeout:
             print(f"No ACK for {name}")
-        
+
+     # 1) DCA Config   
     send_cmd("CONNECT")
     send_cmd("READ_FPGA")
     send_cmd("CONFIG_FPGA")
     send_cmd("CONFIG_PACKET")
     send_cmd("START")
+
+    # 2) AWR Config
+    start_radar_via_uart(RADAR_CLI_PORT,RADAR_CLI_BAUD,RADAR_CFG_FILE)
 
     print("\n Listening for ADC data... \n")
 
@@ -134,7 +192,8 @@ def main():
         except socket.timeout:
             print(f"No data recived at {time.time()}")
             continue
-
+        
+        print(f"Got UDP packet {len(packet)} bytes from {addr}")
         packet_count+=1
 
         # get rid of header
@@ -160,6 +219,9 @@ def main():
 
     print("Stopping DCA1000 stream...")
     cfg_sock.sendto(cmds["STOP"], (DCA_IP, DCA_CONFIG_PORT))
+
+    print("Stopping radar")
+    stop_radar_via_uart(RADAR_CLI_PORT,RADAR_CLI_BAUD)
 
     cfg_sock.close()
     data_sock.close()
