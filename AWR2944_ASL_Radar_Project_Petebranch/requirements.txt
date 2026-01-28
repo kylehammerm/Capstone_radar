@@ -1,0 +1,9 @@
+PyQt6==6.6.0
+pyqtgraph==0.13.3
+numpy==1.24.3
+pydantic==2.5.0
+pyserial==3.5
+opencv-python==4.8.1
+scipy==1.11.4
+pyyaml==6.0.1
+matplotlib==3.7.2
