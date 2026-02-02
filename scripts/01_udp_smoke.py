@@ -16,7 +16,7 @@ DCA_CONFIG_PORT = 4096
 # ==============================
 # RADAR UART SETTINGS (AWR2944)
 # ==============================
-RADAR_CLI_PORT = "COM9"              
+RADAR_CLI_PORT = "COM7"              
 RADAR_CLI_BAUD = 115200
 RADAR_CFG_FILE = r".\config\awr2944.cfg"
 
