@@ -7,8 +7,12 @@ Goal:
 - Make Micro-Doppler *synchronous* with RD (no visible lag)
 
 Key changes vs v3:
-1) The real fix for MD sharpness
-2) configured for GPT ASL signs
+1) Start and stop recording with a single toggle button.
+2) Added labels for saving recordings.
+3) Made the md plot from left to right (time axis).
+4) Key: added tensors saving for CNN training(correctly ).
+5) Config: 1TX 1RX
+
 """
 
 from __future__ import annotations
@@ -49,9 +53,9 @@ SOCKET_TIMEOUT_S = 1.0
 # UART (AWR2944 CLI)
 # ==============================
 USE_UART_TO_START_RADAR = True
-RADAR_CLI_PORT = "COM12" #Note: change to your COM port
+RADAR_CLI_PORT = "COM12" #DEbug: Change to your COM port
 RADAR_CLI_BAUD = 115200
-RADAR_CFG_FILE = r".\config\awr2944_ASL.cfg"  #r".\awr2944_cfg_updated.cfg"
+RADAR_CFG_FILE = r".\config\awr2944_cfg_updated.cfg"  #r".\awr2944_cfg_updated.cfg"
 
 PROMPT = b"mmwDemo:/>"
 CHAR_DELAY_S = 0.0015
@@ -408,54 +412,17 @@ def compute_rd_and_profile(cube: np.ndarray, dsp: DSPState, r0: int, r1: int) ->
     Xrd = np.fft.fftshift(Xrd, axes=0)
 
     mag = np.abs(Xrd).astype(np.float32, copy=False)
-
-    # ===============================
-    # RANGE–DOPPLER (for display)
-    # ===============================
     rd = mag.max(axis=2) if RX_COMBINE == "max" else mag.sum(axis=2)
 
-    # ===============================
-    # ANGLE FFT FOR GATING (from Xr, not rd)
-    # ===============================
-    Xr_ra = np.fft.fftshift(
-        np.fft.fft(Xr[:, r0:r1, :], n=ANGLE_FFT, axis=2),
-        axes=2
-    )
-
-    ra_mag = np.abs(Xr_ra).mean(axis=0)  # [range, angle]
-
-    angle_energy = ra_mag.sum(axis=0)
-    theta_center = int(np.argmax(angle_energy))
-
-    ANGLE_WIN = 3
-    theta_start = max(0, theta_center - ANGLE_WIN)
-    theta_end   = min(ANGLE_FFT, theta_center + ANGLE_WIN + 1)
-
-    # ===============================
-    # ANGLE-GATED MICRO-DOPPLER
-    # ===============================
-    md_cube = mag[:, r0:r1, :]  # Doppler × Range × RX
-
-    md_angle = np.fft.fftshift(
-        np.fft.fft(md_cube, n=ANGLE_FFT, axis=2),
-        axes=2
-    )
-
-    md_gated = md_angle[:, :, theta_start:theta_end]
-
-    # ===============================
-    # APPLY DOPPLER NOTCH (HERE)
-    # ===============================
     if ENABLE_DOPPLER_NOTCH and DOPPLER_NOTCH_BINS > 0:
-        c = md_gated.shape[0] // 2
+        c = rd.shape[0] // 2
         b = int(DOPPLER_NOTCH_BINS)
-        md_gated[max(0, c - b): min(md_gated.shape[0], c + b + 1), :, :] = 0.0
+        rd[max(0, c - b): min(rd.shape[0], c + b + 1), :] = np.min(rd)
 
-    # ===============================
-    # FINAL MD PROFILE
-    # ===============================
-    prof = np.abs(md_gated).sum(axis=(1, 2))
-
+    # Micro-Doppler profile from SAME RD (no extra FFT)
+    r0p = max(0, min(r0, rd.shape[1]))
+    r1p = max(r0p + 1, min(r1, rd.shape[1]))
+    prof = rd[:, r0p:r1p].sum(axis=1)
 
     if USE_DB:
         rd_db = 20.0 * np.log10(rd + 1e-6)
@@ -517,6 +484,7 @@ class RadarUI(QtWidgets.QMainWindow):
 
         # Micro-doppler buffer (doppler x time)
         self._md_hist = np.full((DOPPLER_FFT, MICRO_HISTORY), DB_FLOOR_MD, dtype=np.float32)
+        self._md_raw_frames = []   # list of (128,) arrays
 
         # ==============================
         # Recording state
@@ -525,6 +493,14 @@ class RadarUI(QtWidgets.QMainWindow):
         self.recording_fh = None
         self.recording_dir = Path("recordings")
         self.recording_dir.mkdir(exist_ok=True)
+
+        self.cnn_tensor_dir = Path("cnn_tensors")
+        self.cnn_tensor_dir.mkdir(exist_ok=True)
+
+        # --- CNN tensor recording state ---
+        self.current_label: str | None = None
+        self.current_tensor_dir: Path | None = None
+        self.tensor_frame_idx = 0
 
         central = QtWidgets.QWidget()
         self.setCentralWidget(central)
@@ -678,6 +654,19 @@ class RadarUI(QtWidgets.QMainWindow):
             # Get label from user
             label = self.get_label_from_user()
             if label is None:
+                # User cancelled or empty label → do NOT start recording
+                self.status.showMessage("Recording cancelled (no label)")
+                return
+
+            # Store active label
+            self.active_label = label
+            self.tensor_counter = 0
+
+            # Create CNN tensor label directory
+            self.active_tensor_dir = self.cnn_tensor_dir / label
+            self.active_tensor_dir.mkdir(parents=True, exist_ok=True)
+
+            if label is None:
                 # User cancelled the dialog
                 return
             
@@ -690,7 +679,10 @@ class RadarUI(QtWidgets.QMainWindow):
                 folder_name = f"{label}"
             else:
                 folder_name = f"recording_{timestamp}"
-            
+
+            self.current_label = label
+            self.current_timestamp = timestamp
+
             # Create folder path
             folder_path = self.recording_dir / folder_name
             folder_path.mkdir(exist_ok=True)
@@ -706,6 +698,7 @@ class RadarUI(QtWidgets.QMainWindow):
             try:
                 self.recording_fh = open(fname, "wb")
                 self.recording_enabled = True
+                self._md_hist[:] = DB_FLOOR_MD
                 self.btn_record_toggle.setText("Stop ⏹")
                 self.status.showMessage(f"Recording to: {folder_name}/{filename}")
                 print(f"[REC] Started recording to {fname}")
@@ -725,9 +718,46 @@ class RadarUI(QtWidgets.QMainWindow):
                 print(f"[REC] Error closing file: {e}")
             
             self.recording_enabled = False
-            self.btn_record_toggle.setText("Start Recording")
+            self.btn_record_toggle.setText("Start ▶")
+            self.active_label = None
+            self.active_tensor_dir = None
             self.status.showMessage("Recording stopped")
             print("[REC] Recording stopped")
+            # ==============================
+            # SAVE CNN TENSOR (CANONICAL)
+            # ==============================
+            try:
+                label = self.current_label
+                timestamp = self.current_timestamp
+
+                frames = np.stack(self._md_raw_frames, axis=1)  # (128, T)
+
+                # Enforce fixed history = 200
+                if frames.shape[1] >= MICRO_HISTORY:
+                    md_tensor = frames[:, -MICRO_HISTORY:]
+                else:
+                    pad = MICRO_HISTORY - frames.shape[1]
+                    md_tensor = np.pad(
+                        frames,
+                        ((0, 0), (pad, 0)),
+                        mode="constant",
+                        constant_values=DB_FLOOR_MD
+                    )
+
+                md_tensor = np.clip(md_tensor, DB_FLOOR_MD, None).astype(np.float32)
+
+                tensor_fname = (
+                    self.cnn_tensor_dir
+                    / label
+                    / f"{label}_{timestamp}_md.npy"
+                )
+                np.save(tensor_fname, md_tensor)
+
+                print(f"[CNN] Saved CANONICAL tensor: {tensor_fname}")
+
+            finally:
+                self._md_raw_frames.clear()
+
 
     def shutdown(self):
         """
@@ -852,8 +882,19 @@ class RadarUI(QtWidgets.QMainWindow):
             rd_show = box_blur_2d(rd_show, SMOOTH_KERNEL_RD)
 
         # ====== Micro-doppler history update (FROM SAME RD, no extra FFT) ======
-        self._md_ema = md_prof_db if self._md_ema is None else (EMA_ALPHA_MD * self._md_ema + (1.0 - EMA_ALPHA_MD) * md_prof_db)
+        # RAW micro-doppler profile (NO EMA, NO smoothing)
+        raw_prof = md_prof_db.astype(np.float32)
+
+        # Save raw profile ONLY when recording
+        if self.recording_enabled:
+            self._md_raw_frames.append(raw_prof)
+
+        # EMA only for DISPLAY
+        self._md_ema = raw_prof if self._md_ema is None else (
+            EMA_ALPHA_MD * self._md_ema + (1.0 - EMA_ALPHA_MD) * raw_prof
+        )
         prof = self._md_ema
+
 
         # shift left, append new column at right
         self._md_hist[:, :-1] = self._md_hist[:, 1:]
